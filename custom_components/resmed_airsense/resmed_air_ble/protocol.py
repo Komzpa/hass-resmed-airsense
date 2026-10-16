@@ -26,7 +26,55 @@ ENCRYPTED_BIT = 0x0004
 
 _LOGGER = logging.getLogger(__name__)
 
-FG_THERAPY_STATES = frozenset({"Therapy", "MaskFit", "TestDrive", "Running"})
+# FGState values from libfiglib nameMappings (shortName ZRM). Wire EventNotification
+# usually carries the string form; native/periodic paths may carry the int code.
+FG_STATE_BY_CODE: dict[int, str] = {
+    0: "Reset",
+    1: "Standby",
+    2: "ResetCompliance",
+    3: "Therapy",
+    4: "MaskFit",
+    5: "TestMode",
+    6: "SystemError",
+    7: "Upgrade",
+    8: "UpgradePreparation",
+    9: "Setup",
+}
+# String forms seen on the wire (Get / EventNotification) plus the APK codes above.
+FG_STATE_NAMES: tuple[str, ...] = (
+    "Reset",
+    "Standby",
+    "ResetCompliance",
+    "Therapy",
+    "MaskFit",
+    "TestMode",
+    "TestDrive",  # companion-app string; not in the 0-9 ZRM table
+    "SystemError",
+    "Upgrade",
+    "UpgradePreparation",
+    "Setup",
+    "Running",  # seen on some Air 11 firmware builds
+)
+
+FG_THERAPY_STATES = frozenset({"Therapy", "MaskFit", "TestDrive", "Running", "TestMode"})
+
+
+def normalize_fg_state(value: object) -> str | None:
+    """Map an FGState EventNotification/Get value to its APK string name."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return FG_STATE_BY_CODE.get(value, str(value))
+    if isinstance(value, float) and value.is_integer():
+        return FG_STATE_BY_CODE.get(int(value), str(int(value)))
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return FG_STATE_BY_CODE.get(int(text), text)
+    return text
 
 
 @dataclass(frozen=True)

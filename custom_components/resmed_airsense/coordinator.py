@@ -25,6 +25,7 @@ from .const import (
     AUTH_REJECTIONS_FOR_REAUTH,
     CONF_CLIENT_ID,
     CONF_MASTER_PAIR_KEY,
+    CONF_SERIAL,
     DOMAIN,
     EVENT_IDS,
     EVENT_THERAPY_STOPPED,
@@ -39,9 +40,10 @@ from .const import (
     SUMMARY_INTERVAL,
     SUMMARY_RETRY,
 )
-from .resmed_air_ble import FG_THERAPY_STATES, AirSenseClient, AirSenseError, AuthError, Credentials
+from .resmed_air_ble import FG_THERAPY_STATES, AirSenseClient, AirSenseError, AuthError, Credentials, normalize_fg_state
 from .resmed_air_ble.logs import CloudUpload, parse_cloud_uploads, parse_soundchecks
 from .resmed_air_ble.summary import DailySummary, last_night, parse_summary_spool
+from .summary_statistics import async_import_summary_statistics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -308,7 +310,18 @@ class AirSenseCoordinator:
             self._set_days(days)
             self._save(raw)
             self._notify()
+            await self._import_summary_statistics()
         return True
+
+    async def _import_summary_statistics(self) -> None:
+        """Publish multi-night Summary values into HA long-term statistics graphs."""
+        if not self.data.days:
+            return
+        serial = self.entry.data.get(CONF_SERIAL) or self.address.replace(":", "").lower()
+        try:
+            async_import_summary_statistics(self.hass, serial, self.data.days)
+        except Exception as err:  # pragma: no cover - recorder may be absent in unit tests
+            _LOGGER.debug("%s: summary statistics import skipped: %s", self.address, err)
 
     async def _refresh_logs(self, client: AirSenseClient) -> None:
         """Cloud upload + SoundCheck logs; best effort (a failure just keeps the previous values)."""
@@ -346,6 +359,10 @@ class AirSenseCoordinator:
     def _update_event(self, data_id: str, value: Any) -> None:
         if value is None:
             return
+        if data_id == "FGState":
+            value = normalize_fg_state(value)
+            if value is None:
+                return
         prev = self.data.events.get(data_id)
         if prev == value:
             return

@@ -110,9 +110,12 @@ Ids include `MaskPressure-100hz`, `InspiratoryPressure-50hz`, `ExpiratoryPressur
 
 **Logs (spools)** — `StartSpool {"maxSpoolSize", "spoolAddress": {"<Log>": {"fromDateTime": ISO8601}}}` →
 `spoolId`; `PullSpoolFragments {"spoolId", "maxFragmentSize", "maxNotifications": 0}` → notifications
-`SpoolFragment {"seq", "data": base64, "status"}` until `SPOOL_COMPLETE_*`. Concatenate `data` by `seq`; the
-result is a protobuf stream (no schema is published; fields below were decoded). Bluetooth proxies occasionally
-drop a notification: a gap in `seq` or silence means the read must be retried.
+`SpoolFragment {"seq", "data": base64, "status", "spoolHash"?, "nextSpoolAddress"?}` until a terminal
+status. Status values (APK `ccg$c`): `SPOOL_INCOMPLETE`, `SPOOL_COMPLETE_MORE_DATA_PENDING`,
+`SPOOL_COMPLETE_NO_MORE_DATA`, `ERROR_DATA_UNAVAILABLE`. Concatenate `data` by `seq` within one
+`spoolId`; on `SPOOL_COMPLETE_MORE_DATA_PENDING` re-issue `StartSpool` using
+`nextSpoolAddress.<Log>.fromDateTime` and append. A gap in `seq` or silence means the read must be
+retried from the original `fromDateTime` (Bluetooth proxies occasionally drop a notification).
 
 ## 7. Daily summary (`Summary` spool)
 

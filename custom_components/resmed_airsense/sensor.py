@@ -29,6 +29,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import AirSenseConfigEntry
 from .coordinator import AirSenseData
 from .entity import AirSenseEntity
+from .resmed_air_ble import FG_STATE_NAMES
 
 CMH2O = "cmH₂O"
 PER_HOUR = "events/h"
@@ -107,7 +108,16 @@ DIAG = EntityCategory.DIAGNOSTIC
 
 SENSORS: tuple[AirSenseSensorDescription, ...] = (
     # ---- live -----------------------------------------------------------------------------
-    D(key="FGState", translation_key="fg_state", value_fn=lambda d: d.events.get("FGState"), live=True),
+    # ENUM so the history/timeline card can render standby/therapy/mask-fit as a state track.
+    # Options are the APK FGState nameMappings (0–9) plus wire strings TestDrive/Running.
+    D(
+        key="FGState",
+        translation_key="fg_state",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(FG_STATE_NAMES),
+        value_fn=lambda d: d.events.get("FGState"),
+        live=True,
+    ),
     D(key="TestDriveState", translation_key="test_drive_state", value_fn=lambda d: d.events.get("TestDriveState"),
       live=True, entity_category=DIAG),
     D(key="RecoverableError", translation_key="recoverable_error", value_fn=lambda d: d.events.get("RecoverableError"),

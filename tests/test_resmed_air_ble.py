@@ -1,9 +1,9 @@
 import asyncio
 import base64
+import itertools
 import json
 import pathlib
 import re
-
 import pytest
 
 from resmed_air_ble import AirSenseClient, AirSenseError, AuthError
@@ -349,3 +349,141 @@ def test_open_session_timeout_is_not_an_auth_error():
             await c3.open_session(type(creds)("FFFFFFFFFFFF", creds.master_pair_key))
 
     asyncio.run(run())
+
+
+def test_normalize_fg_state_apk_codes():
+    """Constructed fixture: APK libfiglib nameMappings 0..9 (PROTOCOL.md §5 / fng + ZRM)."""
+    from resmed_air_ble import FG_STATE_BY_CODE, FG_THERAPY_STATES, normalize_fg_state
+
+    assert FG_STATE_BY_CODE[1] == "Standby" and FG_STATE_BY_CODE[3] == "Therapy"
+    assert FG_STATE_BY_CODE[4] == "MaskFit" and FG_STATE_BY_CODE[5] == "TestMode"
+    assert normalize_fg_state(0) == "Reset"
+    assert normalize_fg_state(3) == "Therapy"
+    assert normalize_fg_state("3") == "Therapy"
+    assert normalize_fg_state(3.0) == "Therapy"
+    assert normalize_fg_state("Standby") == "Standby"
+    assert normalize_fg_state("  MaskFit ") == "MaskFit"
+    assert normalize_fg_state(None) is None
+    assert "Therapy" in FG_THERAPY_STATES and "TestMode" in FG_THERAPY_STATES
+    assert "Standby" not in FG_THERAPY_STATES
+
+
+def test_client_spool_resumes_on_more_data_pending():
+    """Constructed fixture: SPOOL_COMPLETE_MORE_DATA_PENDING + nextSpoolAddress (APK ccg/i36)."""
+    async def run():
+        dev = FakeDevice()
+        c = AirSenseClient(dev)
+        await c.start()
+        await c.pair("1234")
+        part1 = b"AAAA" * 50
+        part2 = b"BBBB" * 50
+        starts: list[str] = []
+        spool_ids = itertools.count(10)
+
+        def handle(m, orig=dev._handle):
+            if m["method"] == "StartSpool":
+                sid = next(spool_ids)
+                addr = m["params"]["spoolAddress"]["Summary"]["fromDateTime"]
+                starts.append(addr)
+                dev._send({"id": m["id"], "result": {"spoolId": sid}}, enc=True)
+            elif m["method"] == "PullSpoolFragments":
+                sid = m["params"]["spoolId"]
+                dev._send({"id": m["id"], "result": {"spoolId": sid}}, enc=True)
+                if sid == 10:
+                    # first page complete, more pending at a later fromDateTime
+                    dev._send({"method": "SpoolFragment", "params": {
+                        "spoolId": sid, "seq": 0, "data": base64.b64encode(part1).decode(),
+                        "status": "SPOOL_COMPLETE_MORE_DATA_PENDING",
+                        "spoolHash": "hash-page-1",
+                        "nextSpoolAddress": {
+                            "Summary": {"fromDateTime": "2026-09-24T12:00:00.000Z"},
+                        },
+                    }}, enc=True)
+                else:
+                    dev._send({"method": "SpoolFragment", "params": {
+                        "spoolId": sid, "seq": 0, "data": base64.b64encode(part2).decode(),
+                        "status": "SPOOL_COMPLETE_NO_MORE_DATA",
+                        "spoolHash": "hash-page-2",
+                    }}, enc=True)
+            else:
+                orig(m)
+
+        dev._handle = handle
+        import datetime as dt
+        since = dt.datetime(2026, 9, 10, tzinfo=dt.UTC)
+        assert await c.spool("Summary", since) == part1 + part2
+        assert len(starts) == 2
+        assert starts[0].startswith("2026-09-10")
+        assert starts[1] == "2026-09-24T12:00:00.000Z"
+
+    asyncio.run(run())
+
+
+def test_client_spool_more_data_pending_without_next_stops():
+    """Constructed fixture: MORE_DATA_PENDING with null fromDateTime stops (APK i36 log path)."""
+    async def run():
+        dev = FakeDevice()
+        c = AirSenseClient(dev)
+        await c.start()
+        await c.pair("1234")
+        payload = b"only-page"
+
+        def handle(m, orig=dev._handle):
+            if m["method"] == "StartSpool":
+                dev._send({"id": m["id"], "result": {"spoolId": 1}}, enc=True)
+            elif m["method"] == "PullSpoolFragments":
+                dev._send({"id": m["id"], "result": {"spoolId": 1}}, enc=True)
+                dev._send({"method": "SpoolFragment", "params": {
+                    "spoolId": 1, "seq": 0, "data": base64.b64encode(payload).decode(),
+                    "status": "SPOOL_COMPLETE_MORE_DATA_PENDING",
+                    "spoolHash": "h1",
+                    "nextSpoolAddress": {"Summary": {"fromDateTime": None}},
+                }}, enc=True)
+            else:
+                orig(m)
+
+        dev._handle = handle
+        import datetime as dt
+        assert await c.spool("Summary", dt.datetime.now(dt.UTC)) == payload
+
+    asyncio.run(run())
+
+
+def test_summary_statistics_rows_multi_night():
+    """Constructed fixture: multi-day Summary → external statistic rows for graphs."""
+    import sys
+    from pathlib import Path
+
+    # summary_statistics lives in the HA component package
+    root = Path(__file__).parents[1]
+    sys.path.insert(0, str(root))
+    from pbwrite import summary_day
+    from custom_components.resmed_airsense.summary_statistics import build_summary_statistic_rows
+    from resmed_air_ble.summary import parse_summary_spool
+
+    day = 1_790_161_200_000
+    blob = summary_day(day, 313, [(day + 51_480_000, 313)])
+    blob += summary_day(day + 86_400_000, 0, [])  # unused night skipped
+    blob += summary_day(day + 2 * 86_400_000, 400, [(day + 2 * 86_400_000 + 50_000_000, 400)])
+    days = parse_summary_spool(blob)
+    jobs = build_summary_statistic_rows("12345678901", days)
+    by_id = {meta["statistic_id"]: (meta, rows) for meta, rows in jobs}
+    assert "resmed_airsense:12345678901_usage" in by_id
+    assert "resmed_airsense:12345678901_ahi" in by_id
+    assert "resmed_airsense:12345678901_leak_p95" in by_id
+    assert "resmed_airsense:12345678901_pressure_p95" in by_id
+    usage_meta, usage_rows = by_id["resmed_airsense:12345678901_usage"]
+    assert usage_meta["source"] == "resmed_airsense" and usage_meta["has_mean"] is True
+    assert len(usage_rows) == 2  # only nights with usage
+    assert usage_rows[0]["mean"] == 5.22
+    assert usage_rows[1]["mean"] == round(400 / 60, 2)
+    ahi_rows = by_id["resmed_airsense:12345678901_ahi"][1]
+    assert ahi_rows[0]["mean"] == 0.9
+    leak_rows = by_id["resmed_airsense:12345678901_leak_p95"][1]
+    assert leak_rows[0]["mean"] == 26.4  # 0.44 L/s * 60
+    pressure_rows = by_id["resmed_airsense:12345678901_pressure_p95"][1]
+    assert pressure_rows[0]["mean"] == 11.4
+    # hour-aligned UTC starts, distinct per night
+    starts = [r["start"] for r in usage_rows]
+    assert all(s.minute == 0 and s.second == 0 for s in starts)
+    assert starts[0] != starts[1]
