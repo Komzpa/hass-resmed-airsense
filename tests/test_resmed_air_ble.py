@@ -302,7 +302,9 @@ def test_client_start_spool_params_match_apk():
 
     Request shape matches the APK: kl0.DEFAULT_MAX_SPOOL_SIZE = 4096 and GsonUtil.java:78-79.
     Live AS11 refuses 5 of 15 spool names with JSON-RPC -32602 while 10 work under the same shape.
-    The cause is not established; see captures/spool-refusal-matrix-2026-10-16.json in resmed-apk-re.
+    The cause is not established; tested live with 8 request variants (date range, timestamp
+    format, without maxSpoolSize, without fromDateTime, multi-name); Summary succeeds under the
+    same shapes.
     """
 
     async def run():

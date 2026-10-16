@@ -229,7 +229,9 @@ class AirSenseClient:
         # (Joda UTC toString). On live AS11, 5 of 15 spool names (TherapyEvents, UsageEvents,
         # SystemActivityEvents, SystemExceptionEvents, DiagnosticExceptionEvents) are refused with
         # JSON-RPC -32602 Invalid Params; the other 10 succeed with this same shape. The cause is
-        # not established; see captures/spool-refusal-matrix-2026-10-16.json in resmed-apk-re.
+        # not established; tested live with 8 request variants (date range, timestamp format,
+        # without maxSpoolSize, without fromDateTime, multi-name); Summary succeeds under the
+        # same shapes.
         params = {
             "maxSpoolSize": 4096,
             "spoolAddress": {
