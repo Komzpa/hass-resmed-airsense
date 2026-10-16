@@ -28,6 +28,7 @@ from .const import (
     CONF_SERIAL,
     DIAGNOSTIC_SPOOL_BYTE_CAP,
     DIAGNOSTIC_SPOOL_DAYS,
+    DIAGNOSTIC_SPOOL_IDLE_TIMEOUT,
     DIAGNOSTIC_SPOOL_NAMES,
     DOMAIN,
     EVENT_IDS,
@@ -368,23 +369,34 @@ class AirSenseCoordinator:
                 "days": DIAGNOSTIC_SPOOL_DAYS,
                 "spools": {},
             }
-        since = dt.datetime.now(dt.UTC) - dt.timedelta(days=DIAGNOSTIC_SPOOL_DAYS)
-        # Prefer earliest therapy session when known so TOMP/Summary match the night window.
+        default_since = dt.datetime.now(dt.UTC) - dt.timedelta(days=DIAGNOSTIC_SPOOL_DAYS)
+        # Prefer earliest therapy session when known so Summary matches the night window.
+        session_since: dt.datetime | None = None
         used = [d for d in self.data.days if d.usage_minutes > 0 and d.sessions]
         if used:
             session_since = min(session.start for day in used for session in day.sessions)
-            if session_since < since:
-                since = session_since
+        # TOMP stalled at 26 frags with a 30-day lookback (r1); the working path used the
+        # earliest used session only (coordinator._refresh_therapy_one_minute / 4fd3223).
+        tomp_since = session_since or default_since
+        since = default_since
+        if session_since is not None and session_since < since:
+            since = session_since
         out: dict[str, Any] = {}
         async with self._spool_lock:
             for name in DIAGNOSTIC_SPOOL_NAMES:
+                name_since = tomp_since if name == "TherapyOneMinutePeriodic" else since
                 entry: dict[str, Any] = {
                     "address": name,
-                    "requested_from": since.isoformat(),
+                    "requested_from": name_since.isoformat(),
                     "byte_cap": DIAGNOSTIC_SPOOL_BYTE_CAP,
                 }
                 try:
-                    read = await client.spool_read(name, since, max_bytes=DIAGNOSTIC_SPOOL_BYTE_CAP)
+                    read = await client.spool_read(
+                        name,
+                        name_since,
+                        idle_timeout=DIAGNOSTIC_SPOOL_IDLE_TIMEOUT,
+                        max_bytes=DIAGNOSTIC_SPOOL_BYTE_CAP,
+                    )
                 except (AirSenseError, ValueError, IndexError, TypeError) as err:
                     entry.update(
                         {

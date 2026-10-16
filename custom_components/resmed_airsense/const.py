@@ -38,6 +38,8 @@ DIAGNOSTIC_SPOOL_NAMES: tuple[str, ...] = (
 # Cap each diagnostics spool pull so a huge blob cannot blow the download.
 DIAGNOSTIC_SPOOL_BYTE_CAP = 262_144  # 256 KiB
 DIAGNOSTIC_SPOOL_DAYS = 30
+# Proxy paths drop mid-spool under load; TOMP needs a longer gap than the default 5s.
+DIAGNOSTIC_SPOOL_IDLE_TIMEOUT = 20.0
 
 
 # pushed on change (the device answers valid per id, so unknown ones are harmless on other models)

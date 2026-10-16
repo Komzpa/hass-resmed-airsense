@@ -224,8 +224,10 @@ class AirSenseClient:
         self, address: str, since: dt.datetime, idle_timeout: float
     ) -> tuple[bytes, str, dt.datetime | None, str | None, int]:
         """One StartSpool + PullSpoolFragments cycle. Returns (payload, status, next_from, hash, frags)."""
+        # APK kl0.DEFAULT_MAX_SPOOL_SIZE = 4096 (jl0 companion factories). Live AS11
+        # rejects 65535 as JSON-RPC -32602 Invalid Params on several event spools.
         params = {
-            "maxSpoolSize": 65535,
+            "maxSpoolSize": 4096,
             "spoolAddress": {
                 address: {"fromDateTime": since.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
             },

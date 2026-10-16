@@ -297,6 +297,69 @@ def test_client_spool_read_unavailable_and_cap():
     asyncio.run(run())
 
 
+def test_client_start_spool_params_match_apk():
+    """StartSpool must use APK kl0 maxSpoolSize=4096 and single-name spoolAddress.
+
+    Live AS11 returns JSON-RPC -32602 Invalid Params for TherapyEvents/UsageEvents/
+    System*Events/DiagnosticExceptionEvents when maxSpoolSize is 65535.
+    """
+
+    async def run():
+        dev = FakeDevice()
+        c = AirSenseClient(dev)
+        await c.start()
+        await c.pair("1234")
+        seen: list[dict] = []
+
+        def handle(m, orig=dev._handle):
+            if m["method"] == "StartSpool":
+                seen.append(m["params"])
+                # Device-shaped rejection for the oversized maxSpoolSize the old client sent.
+                if m["params"].get("maxSpoolSize", 0) > 4096:
+                    dev._send(
+                        {
+                            "id": m["id"],
+                            "error": {"code": -32602, "message": "Invalid Params"},
+                        },
+                        enc=True,
+                    )
+                    return
+                dev._send({"id": m["id"], "result": {"spoolId": 11}}, enc=True)
+            elif m["method"] == "PullSpoolFragments":
+                dev._send({"id": m["id"], "result": {"spoolId": 11}}, enc=True)
+                dev._send(
+                    {
+                        "method": "SpoolFragment",
+                        "params": {
+                            "spoolId": 11,
+                            "seq": 0,
+                            "data": base64.b64encode(b"\x08\x01").decode(),
+                            "status": "SPOOL_COMPLETE_NO_MORE_DATA",
+                            "spoolHash": "dead",
+                        },
+                    },
+                    enc=True,
+                )
+            else:
+                orig(m)
+
+        dev._handle = handle
+        import datetime as dt
+
+        since = dt.datetime(2026, 9, 16, 18, 19, 38, tzinfo=dt.UTC)
+        read = await c.spool_read("TherapyEvents", since)
+        assert read.status == "SPOOL_COMPLETE_NO_MORE_DATA"
+        assert read.data == b"\x08\x01"
+        assert len(seen) == 1
+        params = seen[0]
+        assert params["maxSpoolSize"] == 4096
+        assert list(params["spoolAddress"]) == ["TherapyEvents"]
+        assert params["spoolAddress"]["TherapyEvents"]["fromDateTime"] == "2026-09-16T18:19:38.000Z"
+
+    asyncio.run(run())
+
+
+
 
 def test_reassembler_recovers_after_lost_notification():
     f1 = build_frame(b"x" * 300, T_DEV_PLAIN)
