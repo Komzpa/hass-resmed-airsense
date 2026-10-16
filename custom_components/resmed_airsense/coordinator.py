@@ -321,11 +321,17 @@ class AirSenseCoordinator:
         return True
 
     async def _refresh_therapy_one_minute(self, client: AirSenseClient) -> None:
-        """Capture the opaque per-minute spool once, starting at last night's first session."""
-        night = self.data.last_night
-        if self.data.therapy_running or not night or not night.sessions:
+        """Capture the opaque per-minute spool from the earliest recent therapy session.
+
+        last_night alone can be a short same-day session; start from the earliest session
+        among used days so the prior full night (and later minutes) are in the capture.
+        """
+        if self.data.therapy_running:
             return
-        since = min(session.start for session in night.sessions)
+        used = [d for d in self.data.days if d.usage_minutes > 0 and d.sessions]
+        if not used:
+            return
+        since = min(session.start for day in used for session in day.sessions)
         if self.therapy_one_minute_start == since and self.therapy_one_minute_raw is not None:
             return
         try:
@@ -336,6 +342,7 @@ class AirSenseCoordinator:
         if raw:
             self.therapy_one_minute_start = since
             self.therapy_one_minute_raw = raw
+
 
 
     async def _import_summary_statistics(self) -> None:
