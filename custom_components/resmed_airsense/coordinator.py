@@ -44,7 +44,7 @@ from .const import (
     SUMMARY_INTERVAL,
     SUMMARY_RETRY,
 )
-from .resmed_air_ble import FG_THERAPY_STATES, AirSenseClient, AirSenseError, AuthError, Credentials, normalize_fg_state
+from .resmed_air_ble import FG_THERAPY_STATES, AirSenseClient, AirSenseError, AuthError, Credentials, RpcError, normalize_fg_state
 from .resmed_air_ble.logs import CloudUpload, parse_cloud_uploads, parse_soundchecks
 from .resmed_air_ble.summary import DailySummary, last_night, parse_summary_spool
 from .summary_statistics import async_import_summary_statistics
@@ -398,9 +398,11 @@ class AirSenseCoordinator:
                         max_bytes=DIAGNOSTIC_SPOOL_BYTE_CAP,
                     )
                 except (AirSenseError, ValueError, IndexError, TypeError) as err:
+                    # -32602 Invalid Params: the device refuses this spool name (firmware, not a transport fault).
+                    refused = isinstance(err, RpcError) and err.code == -32602
                     entry.update(
                         {
-                            "status": "ERROR",
+                            "status": "refused" if refused else "ERROR",
                             "error": str(err),
                             "raw_length": 0,
                             "fragments": 0,
@@ -410,6 +412,9 @@ class AirSenseCoordinator:
                             "envelope": None,
                         }
                     )
+                    if refused:
+                        entry["error_code"] = err.code
+                        entry["error_message"] = err.message
                     out[name] = entry
                     continue
                 raw = read.data

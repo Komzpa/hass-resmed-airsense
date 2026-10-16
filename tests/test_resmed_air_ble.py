@@ -300,8 +300,9 @@ def test_client_spool_read_unavailable_and_cap():
 def test_client_start_spool_params_match_apk():
     """StartSpool must use APK kl0 maxSpoolSize=4096 and single-name spoolAddress.
 
-    Live AS11 returns JSON-RPC -32602 Invalid Params for TherapyEvents/UsageEvents/
-    System*Events/DiagnosticExceptionEvents when maxSpoolSize is 65535.
+    Request shape matches the APK: kl0.DEFAULT_MAX_SPOOL_SIZE = 4096 and GsonUtil.java:78-79.
+    Live AS11 refuses 5 of 15 spool names with JSON-RPC -32602 while 10 work under the same shape.
+    The cause is not established; see captures/spool-refusal-matrix-2026-10-16.json in resmed-apk-re.
     """
 
     async def run():
@@ -314,7 +315,7 @@ def test_client_start_spool_params_match_apk():
         def handle(m, orig=dev._handle):
             if m["method"] == "StartSpool":
                 seen.append(m["params"])
-                # Device-shaped rejection for the oversized maxSpoolSize the old client sent.
+                # Fake refuses any maxSpoolSize above the APK value (4096) to pin the request shape.
                 if m["params"].get("maxSpoolSize", 0) > 4096:
                     dev._send(
                         {

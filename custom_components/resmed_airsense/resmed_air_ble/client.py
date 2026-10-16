@@ -47,6 +47,7 @@ class RpcError(AirSenseError):
     def __init__(self, method: str, error: dict) -> None:
         super().__init__(f"{method}: {error}")
         self.code = error.get("code") if isinstance(error, dict) else None
+        self.message = error.get("message") if isinstance(error, dict) else None
 
 
 class AuthError(AirSenseError):
@@ -224,8 +225,11 @@ class AirSenseClient:
         self, address: str, since: dt.datetime, idle_timeout: float
     ) -> tuple[bytes, str, dt.datetime | None, str | None, int]:
         """One StartSpool + PullSpoolFragments cycle. Returns (payload, status, next_from, hash, frags)."""
-        # APK kl0.DEFAULT_MAX_SPOOL_SIZE = 4096 (jl0 companion factories). Live AS11
-        # rejects 65535 as JSON-RPC -32602 Invalid Params on several event spools.
+        # Request shape matches the APK: kl0.DEFAULT_MAX_SPOOL_SIZE = 4096 and GsonUtil.java:78-79
+        # (Joda UTC toString). On live AS11, 5 of 15 spool names (TherapyEvents, UsageEvents,
+        # SystemActivityEvents, SystemExceptionEvents, DiagnosticExceptionEvents) are refused with
+        # JSON-RPC -32602 Invalid Params; the other 10 succeed with this same shape. The cause is
+        # not established; see captures/spool-refusal-matrix-2026-10-16.json in resmed-apk-re.
         params = {
             "maxSpoolSize": 4096,
             "spoolAddress": {

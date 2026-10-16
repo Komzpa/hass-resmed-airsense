@@ -386,3 +386,33 @@ async def test_spool_read_retries_after_lost_fragment(hass: HomeAssistant, mock_
         assert calls["CellularActivityEvents"] == 3
         assert hass.states.get("sensor.airsense_12345678901_cloud_upload_status").state == "ok"
         assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_capture_labels_firmware_refused_spool(hass: HomeAssistant, mock_ble) -> None:
+    from custom_components.resmed_airsense.diagnostics import async_get_config_entry_diagnostics
+    from custom_components.resmed_airsense.resmed_air_ble import RpcError
+
+    good = mock_ble.spool_read.side_effect
+
+    async def picky(address, since, idle_timeout=5.0, max_bytes=None):
+        if address == "TherapyEvents":
+            raise RpcError("StartSpool", {"code": -32602, "message": "Invalid Params"})
+        if address == "UsageEvents":
+            raise RpcError("StartSpool", {"code": -32000, "message": "Device busy"})
+        return await good(address, since, idle_timeout=idle_timeout, max_bytes=max_bytes)
+
+    mock_ble.spool_read.side_effect = picky
+    entry = _entry(hass)
+    with patch("custom_components.resmed_airsense.coordinator.KEEPALIVE_INTERVAL", 3600):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+        spools = diag["all_spools_capture"]["spools"]
+        refused = spools["TherapyEvents"]
+        assert refused["status"] == "refused"
+        assert refused["error_code"] == -32602
+        assert refused["error_message"] == "Invalid Params"
+        other = spools["UsageEvents"]
+        assert other["status"] == "ERROR"
+        assert "error_code" not in other
+        assert await hass.config_entries.async_unload(entry.entry_id)
