@@ -26,6 +26,9 @@ from .const import (
     CONF_CLIENT_ID,
     CONF_MASTER_PAIR_KEY,
     CONF_SERIAL,
+    DIAGNOSTIC_SPOOL_BYTE_CAP,
+    DIAGNOSTIC_SPOOL_DAYS,
+    DIAGNOSTIC_SPOOL_NAMES,
     DOMAIN,
     EVENT_IDS,
     EVENT_THERAPY_STOPPED,
@@ -88,6 +91,8 @@ class AirSenseCoordinator:
         self._summary_raw: str | None = None  # base64 of the last Summary spool
         self.therapy_one_minute_raw: bytes | None = None
         self.therapy_one_minute_start: dt.datetime | None = None
+        self._client: AirSenseClient | None = None
+        self._spool_lock = asyncio.Lock()
 
     # ---- lifecycle ----------------------------------------------------------------------
 
@@ -219,6 +224,7 @@ class AirSenseCoordinator:
             await client.start()
             await client.open_session(self.creds)
             await client.subscribe(EVENT_IDS)
+            self._client = client
             self._set_connected(True)
             _LOGGER.debug("%s: session open", self.address)
             await self._refresh_identity(client)
@@ -254,6 +260,7 @@ class AirSenseCoordinator:
                 if not done:  # quiet period: keepalive also catches half-open links
                     self._update_event("FGState", (await client.get("FGState")).get("FGState"))
         finally:
+            self._client = None
             _LOGGER.debug("%s: session closed (disconnected=%s)", self.address, lost.is_set())
             await client.stop()
             with contextlib.suppress(Exception):
@@ -343,6 +350,81 @@ class AirSenseCoordinator:
             self.therapy_one_minute_start = since
             self.therapy_one_minute_raw = raw
 
+
+
+    async def async_capture_all_spools(self) -> dict[str, Any]:
+        """Pull every APK spool name once for diagnostics (one at a time, byte-capped).
+
+        Errors and DATA_UNAVAILABLE are recorded per name and do not abort the rest.
+        Normal Summary/TOMP polling is unchanged; this only runs on diagnostics download.
+        """
+        import hashlib
+
+        client = self._client
+        if client is None or not self.connected:
+            return {
+                "error": "not_connected",
+                "byte_cap": DIAGNOSTIC_SPOOL_BYTE_CAP,
+                "days": DIAGNOSTIC_SPOOL_DAYS,
+                "spools": {},
+            }
+        since = dt.datetime.now(dt.UTC) - dt.timedelta(days=DIAGNOSTIC_SPOOL_DAYS)
+        # Prefer earliest therapy session when known so TOMP/Summary match the night window.
+        used = [d for d in self.data.days if d.usage_minutes > 0 and d.sessions]
+        if used:
+            session_since = min(session.start for day in used for session in day.sessions)
+            if session_since < since:
+                since = session_since
+        out: dict[str, Any] = {}
+        async with self._spool_lock:
+            for name in DIAGNOSTIC_SPOOL_NAMES:
+                entry: dict[str, Any] = {
+                    "address": name,
+                    "requested_from": since.isoformat(),
+                    "byte_cap": DIAGNOSTIC_SPOOL_BYTE_CAP,
+                }
+                try:
+                    read = await client.spool_read(name, since, max_bytes=DIAGNOSTIC_SPOOL_BYTE_CAP)
+                except (AirSenseError, ValueError, IndexError, TypeError) as err:
+                    entry.update(
+                        {
+                            "status": "ERROR",
+                            "error": str(err),
+                            "raw_length": 0,
+                            "fragments": 0,
+                            "sha256": None,
+                            "raw_base64": None,
+                            "truncated": False,
+                            "envelope": None,
+                        }
+                    )
+                    out[name] = entry
+                    continue
+                raw = read.data
+                entry.update(
+                    {
+                        "status": read.status,
+                        "raw_length": len(raw),
+                        "fragments": read.fragments,
+                        "sha256": hashlib.sha256(raw).hexdigest() if raw else None,
+                        "raw_base64": base64.b64encode(raw).decode("ascii") if raw else None,
+                        "truncated": read.truncated,
+                        "spool_hash": read.spool_hash,
+                        "envelope": None,
+                    }
+                )
+                if raw:
+                    # Lazy import keeps coordinator free of diagnostics helper cycles.
+                    from .diagnostics import _protobuf_json_envelope
+
+                    entry["envelope"] = _protobuf_json_envelope(raw)
+                out[name] = entry
+        return {
+            "byte_cap": DIAGNOSTIC_SPOOL_BYTE_CAP,
+            "days": DIAGNOSTIC_SPOOL_DAYS,
+            "requested_from": since.isoformat(),
+            "spools": out,
+        }
 
 
     async def _import_summary_statistics(self) -> None:

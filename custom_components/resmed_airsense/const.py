@@ -17,6 +17,28 @@ SUMMARY_INTERVAL = 3600  # s; daily summary spool (also re-read 1 min after ther
 SUMMARY_RETRY = 120  # s; retry a failed/partial spool read sooner
 SPOOL_ATTEMPTS = 3  # immediate retries of a spool read (lost notification on proxies)
 SUMMARY_DAYS = 14  # how far back to read the summary spool
+# APK SpoolAddress.kt (acg.java) — complete set for diagnostics capture
+DIAGNOSTIC_SPOOL_NAMES: tuple[str, ...] = (
+    "CellularActivityEvents",
+    "DiagnosticExceptionEvents",
+    "DiagnosticTenMinutePeriodic",
+    "GUIActivityEvents",
+    "MachineMetrics",
+    "MemoryMetrics",
+    "SettingProfilesCollection",
+    "SoundcheckVector",
+    "Summary",
+    "SurveyEvents",
+    "SystemActivityEvents",
+    "SystemExceptionEvents",
+    "TherapyEvents",
+    "TherapyOneMinutePeriodic",
+    "UsageEvents",
+)
+# Cap each diagnostics spool pull so a huge blob cannot blow the download.
+DIAGNOSTIC_SPOOL_BYTE_CAP = 262_144  # 256 KiB
+DIAGNOSTIC_SPOOL_DAYS = 30
+
 
 # pushed on change (the device answers valid per id, so unknown ones are harmless on other models)
 EVENT_IDS = (

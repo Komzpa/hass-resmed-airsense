@@ -1,5 +1,5 @@
 """Local BLE protocol for ResMed Air-family CPAPs (AirSense/AirCurve 11). No Home Assistant deps."""
-from .client import AirSenseClient, AirSenseError, AuthError, RpcError
+from .client import AirSenseClient, AirSenseError, AuthError, RpcError, SpoolRead
 from .protocol import (
     FG_STATE_BY_CODE,
     FG_STATE_NAMES,
@@ -16,6 +16,7 @@ __all__ = [
     "AirSenseError",
     "AuthError",
     "RpcError",
+    "SpoolRead",
     "Credentials",
     "FG_STATE_BY_CODE",
     "FG_STATE_NAMES",

@@ -231,6 +231,72 @@ def test_client_spool():
 
     asyncio.run(run())
 
+def test_client_spool_read_unavailable_and_cap():
+    """spool_read keeps status/fragments; DATA_UNAVAILABLE and byte cap stay local."""
+    from resmed_air_ble.client import SpoolRead
+
+    async def run():
+        dev = FakeDevice()
+        c = AirSenseClient(dev)
+        await c.start()
+        await c.pair("1234")
+        mode = {"name": "ok"}
+
+        def handle(m, orig=dev._handle):
+            if m["method"] == "StartSpool":
+                dev._send({"id": m["id"], "result": {"spoolId": 9}}, enc=True)
+            elif m["method"] == "PullSpoolFragments":
+                dev._send({"id": m["id"], "result": {"spoolId": 9}}, enc=True)
+                if mode["name"] == "unavailable":
+                    dev._send(
+                        {
+                            "method": "SpoolFragment",
+                            "params": {
+                                "spoolId": 9,
+                                "seq": 0,
+                                "data": "",
+                                "status": "ERROR_DATA_UNAVAILABLE",
+                            },
+                        },
+                        enc=True,
+                    )
+                else:
+                    blob = b"\x0a\x04\x08\x01\x10\x02" + b"Z" * 40
+                    dev._send(
+                        {
+                            "method": "SpoolFragment",
+                            "params": {
+                                "spoolId": 9,
+                                "seq": 0,
+                                "data": base64.b64encode(blob).decode(),
+                                "status": "SPOOL_COMPLETE_NO_MORE_DATA",
+                                "spoolHash": "abc",
+                            },
+                        },
+                        enc=True,
+                    )
+            else:
+                orig(m)
+
+        dev._handle = handle
+        import datetime as dt
+
+        mode["name"] = "unavailable"
+        miss = await c.spool_read("SurveyEvents", dt.datetime.now(dt.UTC))
+        assert isinstance(miss, SpoolRead)
+        assert miss.status == "ERROR_DATA_UNAVAILABLE"
+        assert miss.data == b""
+        assert miss.fragments == 1
+
+        mode["name"] = "ok"
+        capped = await c.spool_read("Summary", dt.datetime.now(dt.UTC), max_bytes=10)
+        assert capped.truncated is True
+        assert len(capped.data) == 10
+        assert capped.fragments == 1
+
+    asyncio.run(run())
+
+
 
 def test_reassembler_recovers_after_lost_notification():
     f1 = build_frame(b"x" * 300, T_DEV_PLAIN)

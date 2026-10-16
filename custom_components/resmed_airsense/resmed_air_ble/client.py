@@ -13,6 +13,7 @@ import itertools
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .protocol import (
@@ -60,6 +61,17 @@ VERIFICATION_FAILURE = -11005  # device reply when the clientId/key is not (or n
 
 EventCallback = Callable[[str, Any, dict], None]  # (dataId, value, raw_event)
 NotificationCallback = Callable[[str, dict], None]  # (method, params) for SpoolFragment, StreamData, ...
+
+@dataclass(frozen=True)
+class SpoolRead:
+    """Assembled spool payload plus the terminal fragment metadata the APK exposes."""
+
+    data: bytes
+    status: str
+    fragments: int
+    spool_hash: str | None = None
+    truncated: bool = False
+
 
 
 class AirSenseClient:
@@ -155,19 +167,39 @@ class AirSenseClient:
         `StartSpool` from `nextSpoolAddress.<Name>.fromDateTime` and keeps appending until
         `SPOOL_COMPLETE_NO_MORE_DATA` (or an empty next address).
         """
+        return (await self.spool_read(address, since, idle_timeout=idle_timeout)).data
+
+    async def spool_read(
+        self,
+        address: str,
+        since: dt.datetime,
+        idle_timeout: float = 5.0,
+        max_bytes: int | None = None,
+    ) -> SpoolRead:
+        """Like `spool`, but keeps status / fragment count / hash and optionally caps payload size."""
         from_dt = since.astimezone(dt.UTC)
         assembled = bytearray()
         seen_hashes: set[str] = set()
+        fragments = 0
+        status = ""
+        spool_hash: str | None = None
+        truncated = False
         # Bound the resume chain so a buggy device cannot loop forever.
         for _round in range(32):
-            payload, status, next_from, spool_hash = await self._spool_once(
+            payload, status, next_from, spool_hash, frag_count = await self._spool_once(
                 address, from_dt, idle_timeout
             )
+            fragments += frag_count
             if spool_hash:
                 if spool_hash in seen_hashes:
                     _LOGGER.debug("spool %s: duplicate spoolHash %s; stopping resume", address, spool_hash)
                     break
                 seen_hashes.add(spool_hash)
+            if max_bytes is not None and len(assembled) + len(payload) > max_bytes:
+                remain = max(0, max_bytes - len(assembled))
+                assembled.extend(payload[:remain])
+                truncated = True
+                break
             assembled.extend(payload)
             if status == "ERROR_DATA_UNAVAILABLE":
                 break
@@ -180,12 +212,18 @@ class AirSenseClient:
                 )
                 break
             from_dt = next_from
-        return bytes(assembled)
+        return SpoolRead(
+            data=bytes(assembled),
+            status=status or "UNKNOWN",
+            fragments=fragments,
+            spool_hash=spool_hash,
+            truncated=truncated,
+        )
 
     async def _spool_once(
         self, address: str, since: dt.datetime, idle_timeout: float
-    ) -> tuple[bytes, str, dt.datetime | None, str | None]:
-        """One StartSpool + PullSpoolFragments cycle. Returns (payload, status, next_from, hash)."""
+    ) -> tuple[bytes, str, dt.datetime | None, str | None, int]:
+        """One StartSpool + PullSpoolFragments cycle. Returns (payload, status, next_from, hash, frags)."""
         params = {
             "maxSpoolSize": 65535,
             "spoolAddress": {
@@ -213,14 +251,21 @@ class AirSenseClient:
                 last_frag = frag
                 _LOGGER.debug("spool %s #%s seq %s: %s", address, spool_id, seq, status)
                 if status == "ERROR_DATA_UNAVAILABLE":
-                    return b"", status, None, frag.get("spoolHash")
+                    return b"", status, None, frag.get("spoolHash"), len(chunks)
                 if status.startswith("SPOOL_COMPLETE"):
                     if sorted(chunks) != list(range(seq + 1)):
                         raise AirSenseError(f"spool {address}: missing fragment(s), got {sorted(chunks)}")
                     payload = b"".join(chunks[k] for k in range(seq + 1))
-                    return payload, status, self._next_spool_from(address, last_frag), last_frag.get("spoolHash")
+                    return (
+                        payload,
+                        status,
+                        self._next_spool_from(address, last_frag),
+                        last_frag.get("spoolHash"),
+                        len(chunks),
+                    )
         finally:
             self._spools.pop(spool_id, None)
+
 
     @staticmethod
     def _next_spool_from(address: str, frag: dict[str, Any]) -> dt.datetime | None:

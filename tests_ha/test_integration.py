@@ -19,7 +19,7 @@ from custom_components.resmed_airsense.const import (
     DOMAIN,
     EVENT_THERAPY_STOPPED,
 )
-from custom_components.resmed_airsense.resmed_air_ble import AuthError, Credentials
+from custom_components.resmed_airsense.resmed_air_ble import AirSenseError, AuthError, Credentials
 from pbwrite import cloud_session, soundcheck_run, summary_day
 
 ADDR = "AA:BB:CC:DD:EE:FF"
@@ -85,7 +85,36 @@ def mock_ble():
         # Opaque TOMP payload for the diagnostics capture path (layout proven from live bytes later).
         "TherapyOneMinutePeriodic": b"\x0a\x04\x08\x01\x10\x02",
     }
-    client.spool = AsyncMock(side_effect=lambda address, since: spools[address])
+
+    def _spool(address, since, idle_timeout=5.0):
+        if address not in spools:
+            raise KeyError(address)
+        return spools[address]
+
+    async def _spool_read(address, since, idle_timeout=5.0, max_bytes=None):
+        from custom_components.resmed_airsense.resmed_air_ble import SpoolRead
+
+        if address == "SurveyEvents":
+            return SpoolRead(data=b"", status="ERROR_DATA_UNAVAILABLE", fragments=1)
+        if address == "DiagnosticExceptionEvents":
+            raise AirSenseError(f"spool {address}: stalled after 0 fragment(s)")
+        raw = spools.get(address, b"\x08\x01")
+        if max_bytes is not None and len(raw) > max_bytes:
+            return SpoolRead(
+                data=raw[:max_bytes],
+                status="SPOOL_COMPLETE_NO_MORE_DATA",
+                fragments=1,
+                truncated=True,
+            )
+        return SpoolRead(
+            data=raw,
+            status="SPOOL_COMPLETE_NO_MORE_DATA",
+            fragments=1 if raw else 0,
+            spool_hash="deadbeef" if raw else None,
+        )
+
+    client.spool = AsyncMock(side_effect=_spool)
+    client.spool_read = AsyncMock(side_effect=_spool_read)
     ble = MagicMock(disconnect=AsyncMock())
     with (
         patch("custom_components.resmed_airsense.config_flow.bluetooth.async_ble_device_from_address",
@@ -249,6 +278,7 @@ async def test_timeouts_never_start_reauth(hass: HomeAssistant, mock_ble) -> Non
 
 
 async def test_diagnostics_redacts_secrets(hass: HomeAssistant, mock_ble) -> None:
+    from custom_components.resmed_airsense.const import DIAGNOSTIC_SPOOL_NAMES
     from custom_components.resmed_airsense.diagnostics import async_get_config_entry_diagnostics
 
     entry = _entry(hass)
@@ -268,7 +298,27 @@ async def test_diagnostics_redacts_secrets(hass: HomeAssistant, mock_ble) -> Non
         assert capture["raw_base64"]
         assert capture["envelope"]["parsed"] is True
         assert capture["requested_from"].startswith("2026-09")
+        all_cap = diag["all_spools_capture"]
+        assert set(all_cap["spools"]) == set(DIAGNOSTIC_SPOOL_NAMES)
+        tomp = all_cap["spools"]["TherapyOneMinutePeriodic"]
+        assert tomp["status"] == "SPOOL_COMPLETE_NO_MORE_DATA"
+        assert tomp["raw_length"] == 6
+        assert tomp["fragments"] == 1
+        assert tomp["sha256"]
+        assert tomp["raw_base64"]
+        assert tomp["envelope"]["parsed"] is True
+        survey = all_cap["spools"]["SurveyEvents"]
+        assert survey["status"] == "ERROR_DATA_UNAVAILABLE"
+        assert survey["raw_length"] == 0
+        assert survey["raw_base64"] is None
+        bad = all_cap["spools"]["DiagnosticExceptionEvents"]
+        assert bad["status"] == "ERROR"
+        assert "stalled" in bad["error"]
+        # unavailable / error must not abort the rest
+        assert all_cap["spools"]["Summary"]["raw_length"] > 0
         assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 
 
 async def test_restores_last_known_data_while_out_of_range(hass: HomeAssistant, mock_ble, hass_storage) -> None:

@@ -67,6 +67,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: AirSens
             "raw_base64": base64.b64encode(c.therapy_one_minute_raw).decode("ascii"),
             "envelope": _protobuf_json_envelope(c.therapy_one_minute_raw),
         }
+    # Live pull of every APK spool name (one at a time, byte-capped); errors stay per-spool.
+    all_spools = await c.async_capture_all_spools()
     return {
         "entry": async_redact_data(dict(entry.data), TO_REDACT),
         "connected": c.connected,
@@ -81,4 +83,5 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: AirSens
         # raw field numbers of every stored day, to help decode the fields that are still unknown
         "days_raw": [{str(k): v for k, v in day.raw.items() if isinstance(v, int)} for day in d.days],
         "therapy_one_minute_capture": capture,
+        "all_spools_capture": all_spools,
     }
