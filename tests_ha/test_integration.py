@@ -82,6 +82,8 @@ def mock_ble():
         "Summary": summary_day(DAY, 313, [(DAY + 51_480_000, 38), (DAY + 53_880_000, 275)]),
         "CellularActivityEvents": cloud_session(DAY + 60_000_000),
         "SoundcheckVector": soundcheck_run(DAY),
+        # Opaque TOMP payload for the diagnostics capture path (layout proven from live bytes later).
+        "TherapyOneMinutePeriodic": b"\x0a\x04\x08\x01\x10\x02",
     }
     client.spool = AsyncMock(side_effect=lambda address, since: spools[address])
     ble = MagicMock(disconnect=AsyncMock())
@@ -260,6 +262,12 @@ async def test_diagnostics_redacts_secrets(hass: HomeAssistant, mock_ble) -> Non
         assert diag["entry"]["master_pair_key"] == "**REDACTED**"
         assert diag["last_night"]["usage_minutes"] == 313
         assert diag["settings"]["ActiveProfiles"]["TherapyProfile"] == "AutoSetProfile"
+        capture = diag["therapy_one_minute_capture"]
+        assert capture["address"] == "TherapyOneMinutePeriodic"
+        assert capture["raw_length"] == 6
+        assert capture["raw_base64"]
+        assert capture["envelope"]["parsed"] is True
+        assert capture["requested_from"].startswith("2026-09")
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 

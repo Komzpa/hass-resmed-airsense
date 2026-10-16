@@ -86,6 +86,8 @@ class AirSenseCoordinator:
         # last known non-live data, so sensors survive restarts and out-of-range periods
         self._store: Store[dict[str, Any]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}")
         self._summary_raw: str | None = None  # base64 of the last Summary spool
+        self.therapy_one_minute_raw: bytes | None = None
+        self.therapy_one_minute_start: dt.datetime | None = None
 
     # ---- lifecycle ----------------------------------------------------------------------
 
@@ -288,17 +290,21 @@ class AirSenseCoordinator:
         self._notify()
 
     async def _spool(self, client: AirSenseClient, address: str, days: int) -> bytes:
-        """Reads a spool, retrying right away: the proxy occasionally drops a notification."""
+        """Reads a spool by age, retrying immediately if a proxy drops a notification."""
         since = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
-        attempt = 1
-        while True:
+        return await self._spool_since(client, address, since)
+
+    async def _spool_since(self, client: AirSenseClient, address: str, since: dt.datetime) -> bytes:
+        """Reads a spool from an exact timestamp, retrying a dropped notification."""
+        for attempt in range(1, SPOOL_ATTEMPTS + 1):
             try:
                 return await client.spool(address, since)
             except AirSenseError as err:
                 _LOGGER.debug("%s: %s spool attempt %d failed: %s", self.address, address, attempt, err)
                 if attempt == SPOOL_ATTEMPTS:
                     raise
-                attempt += 1
+        raise AssertionError("unreachable")
+
 
     async def _refresh_summary(self, client: AirSenseClient) -> bool:
         try:
@@ -308,10 +314,29 @@ class AirSenseCoordinator:
             return False
         if days:
             self._set_days(days)
+            await self._refresh_therapy_one_minute(client)
             self._save(raw)
             self._notify()
             await self._import_summary_statistics()
         return True
+
+    async def _refresh_therapy_one_minute(self, client: AirSenseClient) -> None:
+        """Capture the opaque per-minute spool once, starting at last night's first session."""
+        night = self.data.last_night
+        if self.data.therapy_running or not night or not night.sessions:
+            return
+        since = min(session.start for session in night.sessions)
+        if self.therapy_one_minute_start == since and self.therapy_one_minute_raw is not None:
+            return
+        try:
+            raw = await self._spool_since(client, "TherapyOneMinutePeriodic", since)
+        except (AirSenseError, ValueError, IndexError) as err:
+            _LOGGER.debug("%s: per-minute spool read failed: %s", self.address, err)
+            return
+        if raw:
+            self.therapy_one_minute_start = since
+            self.therapy_one_minute_raw = raw
+
 
     async def _import_summary_statistics(self) -> None:
         """Publish multi-night Summary values into HA long-term statistics graphs."""
