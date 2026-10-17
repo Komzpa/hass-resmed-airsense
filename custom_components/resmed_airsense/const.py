@@ -16,7 +16,7 @@ SETTINGS_INTERVAL = 900  # s; SettingProfiles + MachineMetrics
 SUMMARY_INTERVAL = 3600  # s; daily summary spool (also re-read 1 min after therapy stops)
 SUMMARY_RETRY = 120  # s; retry a failed/partial spool read sooner
 SPOOL_ATTEMPTS = 3  # immediate retries of a spool read (lost notification on proxies)
-SUMMARY_DAYS = 14  # how far back to read the summary spool
+SUMMARY_DAYS = 3650  # read back far enough to cover the device's full Summary retention
 # APK SpoolAddress.kt (acg.java) — complete set for diagnostics capture
 DIAGNOSTIC_SPOOL_NAMES: tuple[str, ...] = (
     "CellularActivityEvents",

@@ -595,7 +595,7 @@ def test_summary_statistics_rows_multi_night():
 
     day = 1_790_161_200_000
     blob = summary_day(day, 313, [(day + 51_480_000, 313)])
-    blob += summary_day(day + 86_400_000, 0, [])  # unused night skipped
+    blob += summary_day(day + 86_400_000, 0, [])  # empty night imported as usage 0
     blob += summary_day(day + 2 * 86_400_000, 400, [(day + 2 * 86_400_000 + 50_000_000, 400)])
     days = parse_summary_spool(blob)
     jobs = build_summary_statistic_rows("12345678901", days)
@@ -606,9 +606,10 @@ def test_summary_statistics_rows_multi_night():
     assert "resmed_airsense:12345678901_pressure_p95" in by_id
     usage_meta, usage_rows = by_id["resmed_airsense:12345678901_usage"]
     assert usage_meta["source"] == "resmed_airsense" and usage_meta["has_mean"] is True
-    assert len(usage_rows) == 2  # only nights with usage
+    assert len(usage_rows) == 3  # every device-held night; the empty one is usage 0
     assert usage_rows[0]["mean"] == 5.22
-    assert usage_rows[1]["mean"] == round(400 / 60, 2)
+    assert usage_rows[1]["mean"] == 0.0
+    assert usage_rows[2]["mean"] == round(400 / 60, 2)
     ahi_rows = by_id["resmed_airsense:12345678901_ahi"][1]
     assert ahi_rows[0]["mean"] == 0.9
     leak_rows = by_id["resmed_airsense:12345678901_leak_p95"][1]
@@ -619,3 +620,62 @@ def test_summary_statistics_rows_multi_night():
     starts = [r["start"] for r in usage_rows]
     assert all(s.minute == 0 and s.second == 0 for s in starts)
     assert starts[0] != starts[1]
+
+
+def test_summary_statistics_all_fields_and_all_nights():
+    """Every numeric Summary field and every device-held night is imported.
+
+    Regression guard: before the fix only usage / ahi / leak_p95 / pressure_p95 were
+    emitted and the empty night was dropped entirely (usage rows == 2).
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    sys.path.insert(0, str(root))
+    from pbwrite import summary_day
+    from custom_components.resmed_airsense.summary_statistics import build_summary_statistic_rows
+    from resmed_air_ble.summary import parse_summary_spool
+
+    day = 1_790_161_200_000
+    blob = summary_day(day, 313, [(day + 51_480_000, 313)])
+    blob += summary_day(day + 86_400_000, 0, [])  # empty night -> usage 0
+    blob += summary_day(day + 2 * 86_400_000, 400, [(day + 2 * 86_400_000 + 50_000_000, 400)])
+    days = parse_summary_spool(blob)
+    jobs = build_summary_statistic_rows("12345678901", days)
+    by_id = {meta["statistic_id"]: rows for meta, rows in jobs}
+
+    # usage covers every device-held night; the empty night is a real 0.0 point
+    assert [r["mean"] for r in by_id["resmed_airsense:12345678901_usage"]] == [5.22, 0.0, 6.67]
+
+    # the expanded numeric Summary fields, sampled across every field family.
+    expected = {
+        "ai": 0.7, "hi": 0.1, "oai": 0.3, "cai": 0.3, "uai": 0.0, "rin": 0.0,
+        "csr_minutes": 0.0, "mask_events": 1.0,
+        "leak_median": 12.0, "leak_p70": 14.4, "leak_max": 40.8,
+        "target_pressure_median": 10.2, "target_pressure_max": 12.6,
+        "target_epap_median": 7.2, "target_epap_p95": 8.52,
+        "mask_pressure_median": 8.0, "mask_pressure_p95": 9.12, "mask_pressure_max": 10.08,
+        "tidal_volume_median": 0.48, "tidal_volume_max": 1.12,
+        "minute_vent_median": 7.25, "minute_vent_max": 14.5,
+        "respiratory_rate_median": 14.4, "respiratory_rate_max": 29.6,
+        "blower_pressure_p5": 4.74, "blower_pressure_p95": 10.9,
+        "flow_p5": 9.6, "flow_p95": 30.0, "blower_flow_median": 38.4,
+        "ambient_humidity": 15.6, "humidifier_temperature": 23.2, "humidifier_power": 7.6,
+    }
+    for suffix, value in expected.items():
+        rows = by_id[f"resmed_airsense:12345678901_{suffix}"]
+        assert rows[0]["mean"] == value, f"{suffix}: {rows[0]['mean']} != {value}"
+        # therapy metrics cover the 2 used nights; the empty night is usage-only
+        assert len(rows) == 2, f"{suffix} should cover the 2 used nights, got {len(rows)}"
+
+
+def test_summary_read_window_covers_device_history():
+    """The Summary spool read window must cover the device's full held history.
+
+    Regression guard: the window was SUMMARY_DAYS=14, so once the device accumulated
+    more than a fortnight of nights the oldest were silently dropped from the import.
+    """
+    from custom_components.resmed_airsense.const import SUMMARY_DAYS
+
+    assert SUMMARY_DAYS >= 365, f"Summary read window too small: {SUMMARY_DAYS} days"
