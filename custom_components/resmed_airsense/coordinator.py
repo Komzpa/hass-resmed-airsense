@@ -262,6 +262,10 @@ class AirSenseCoordinator:
                     self._update_event("FGState", (await client.get("FGState")).get("FGState"))
         finally:
             self._client = None
+            # Cancellation and unexpected failures must invalidate live state too.
+            # Keep cached Summary/settings/meters; disconnect is not zero usage.
+            self._set_connected(False)
+            self._clear_live()
             _LOGGER.debug("%s: session closed (disconnected=%s)", self.address, lost.is_set())
             await client.stop()
             with contextlib.suppress(Exception):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -240,6 +241,113 @@ async def test_entities_and_event(hass: HomeAssistant, mock_ble) -> None:
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 
+async def test_fg_state_enum_consumer_validation_and_backup_stop(hass: HomeAssistant, mock_ble) -> None:
+    """A valid Backup reply must survive the real entity write, notify and unload path."""
+    from custom_components.resmed_airsense.const import SUMMARY_DAYS
+    from custom_components.resmed_airsense.resmed_air_ble.protocol import FG_STATE_BY_CODE, FG_STATE_NAMES
+    from custom_components.resmed_airsense.sensor import AirSenseSensor
+
+    async def subscribe(*_args):
+        # The device can send its state before _session marks the link connected.
+        mock_ble.on_event("FGState", "Backup", {})
+        return {}
+
+    mock_ble.subscribe.side_effect = subscribe
+    mock_ble.get.side_effect = lambda *names: {
+        n: "Backup" if n == "FGState" else GET[n] for n in names if n in GET
+    }
+    entry = _entry(hass)
+    with patch("custom_components.resmed_airsense.coordinator.KEEPALIVE_INTERVAL", 3600):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+        state = lambda e: hass.states.get(f"sensor.airsense_12345678901_{e}")  # noqa: E731
+        assert state("state").state == "Backup"
+        assert state("state").attributes["options"] == list(FG_STATE_NAMES)
+        assert set(FG_STATE_BY_CODE) == set(range(10))
+        assert set(FG_STATE_NAMES) == {*FG_STATE_BY_CODE.values(), "TestDrive", "Running", "Backup"}
+        # Every canonical name (not just Backup) passes HA's actual enum validator.
+        for name in FG_STATE_NAMES:
+            mock_ble.on_event("FGState", name, {})
+            assert state("state").state == name
+        for code, name in FG_STATE_BY_CODE.items():
+            mock_ble.on_event("FGState", code, {})
+            assert state("state").state == name
+
+        # Counterfactual old options: the same real _set_connected -> _notify ->
+        # async_write_ha_state consumer must reject Backup, not quietly accept it.
+        coordinator._set_connected(False)
+        mock_ble.on_event("FGState", "Backup", {})
+        old_options = [name for name in FG_STATE_NAMES if name != "Backup"]
+        with patch.object(AirSenseSensor, "options", property(
+            lambda entity: old_options if entity.entity_description.key == "FGState" else entity.entity_description.options
+        )):
+            with pytest.raises(ValueError, match="provides state value 'Backup'.*not in the list of options"):
+                coordinator._set_connected(True)
+        # Restoring the canonical options fixes that exact write without swallowing errors.
+        coordinator._notify()
+        coordinator._set_connected(False)
+        coordinator._set_connected(True)
+        assert state("state").state == "Backup"
+        assert hass.states.get("binary_sensor.airsense_12345678901_therapy").state == "off"
+        assert hass.states.get("binary_sensor.airsense_12345678901_connected").state == "on"
+
+        cached = {key: state(key).state for key in (
+            "last_night", "usage", "ahi", "leak_95th_percentile", "therapy_mode", "therapy_hours"
+        )}
+        assert float(cached["usage"]) > 0 and cached["ahi"] == "0.9"
+        days, last_night, raw = coordinator.data.days, coordinator.data.last_night, coordinator._summary_raw
+        assert days and last_night is not None and raw
+        assert SUMMARY_DAYS == 3650
+        summary_call = next(call for call in mock_ble.spool.await_args_list if call.args[0] == "Summary")
+        age = dt.datetime.now(dt.UTC) - summary_call.args[1]
+        assert dt.timedelta(days=3650) <= age < dt.timedelta(days=3650, minutes=1)
+
+        await coordinator.async_stop()
+        assert coordinator._task.cancelled()
+        assert hass.states.get("binary_sensor.airsense_12345678901_connected").state == "off"
+        assert hass.states.get("binary_sensor.airsense_12345678901_therapy").state == "unavailable"
+        assert state("state").state == "unavailable"
+        assert state("mask_pressure").state == "unavailable"
+        assert coordinator.data.live == {}
+        assert coordinator.data.days is days and coordinator.data.last_night is last_night
+        assert coordinator._summary_raw == raw
+        assert {key: state(key).state for key in cached} == cached
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        assert entry.state is config_entries.ConfigEntryState.NOT_LOADED
+
+
+async def test_session_failure_clears_live_but_preserves_summary(hass: HomeAssistant, mock_ble) -> None:
+    """An unexpected session failure invalidates live consumers but still propagates."""
+    entry = _entry(hass)
+    with patch("custom_components.resmed_airsense.coordinator.KEEPALIVE_INTERVAL", 3600):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+        cached_summary = coordinator.data.last_night
+        usage = hass.states.get("sensor.airsense_12345678901_usage").state
+        mock_ble.call.side_effect = RuntimeError("session failure control")
+        mock_ble.on_event("FGState", "Therapy", {})
+        mock_ble.on_notification("StreamData", {"data": [{"MaskPressure-100hz": [10.4, 10.6]}]})
+        assert hass.states.get("binary_sensor.airsense_12345678901_therapy").state == "on"
+        assert hass.states.get("sensor.airsense_12345678901_mask_pressure").state == "10.5"
+        task = coordinator._task
+        with pytest.raises(RuntimeError, match="session failure control"):
+            await task
+        assert not coordinator.connected and coordinator.data.live == {}
+        assert hass.states.get("binary_sensor.airsense_12345678901_connected").state == "off"
+        assert hass.states.get("binary_sensor.airsense_12345678901_therapy").state == "unavailable"
+        assert hass.states.get("sensor.airsense_12345678901_state").state == "unavailable"
+        assert hass.states.get("sensor.airsense_12345678901_mask_pressure").state == "unavailable"
+        assert coordinator.data.last_night is cached_summary
+        assert hass.states.get("sensor.airsense_12345678901_usage").state == usage
+        with pytest.raises(RuntimeError, match="session failure control"):
+            await coordinator.async_stop()
+        # The failure has been observed above; detach the failed task only for fixture teardown.
+        coordinator._task = None
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_auth_error_starts_reauth(hass: HomeAssistant, mock_ble) -> None:
     mock_ble.open_session.side_effect = AuthError("VerificationFailure")
     entry = _entry(hass)
@@ -343,6 +451,9 @@ async def test_restores_last_known_data_while_out_of_range(hass: HomeAssistant, 
         assert hass.states.get("binary_sensor.airsense_12345678901_connected").state == "off"
         assert state("ahi") == "0.9" and state("therapy_mode") == "AutoSet" and state("therapy_hours") == "319.9"
         assert state("state") == "unavailable"  # live values need the link
+        assert hass.states.get("binary_sensor.airsense_12345678901_therapy").state == "unavailable"
+        assert float(state("usage")) > 0
+        assert state("last_night") != "unavailable"
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 

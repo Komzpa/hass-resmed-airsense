@@ -46,6 +46,15 @@ device page. Last known values are kept across restarts.
 become unavailable, while last night's data, settings and meters stay. It reconnects by itself as soon as the machine
 wakes up (touching it or starting therapy).
 
+**Reporting contract:** the state enum MUST expose every canonical `FG_STATE_NAMES` value from
+`resmed_air_ble/protocol.py`: all APK/native ZRM names plus evidenced wire-only names, including
+`Backup`. Valid states MUST reach Home Assistant unchanged; do not substitute `unknown` or suppress
+entity-write errors. Session loss, cancellation or failure MUST turn *Connected* off and make
+live state and *Therapy* unavailable, never infer therapy-off from a disconnected machine. Cached
+Summary dates/values, settings and meters MUST remain readable; the full-history Summary read window
+(`SUMMARY_DAYS = 3650`) and statistics importer MUST be preserved. Reports MUST label an older Summary
+with its actual date and leave a missing current night as a gap, not zero usage or a power-based estimate.
+
 ## Important: Home Assistant *or* the phone app's Bluetooth — not both
 
 The machine remembers **one Bluetooth pairing** (the code shown on its screen) and accepts **one connection** at a

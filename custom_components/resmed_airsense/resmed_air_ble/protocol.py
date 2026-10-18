@@ -40,20 +40,14 @@ FG_STATE_BY_CODE: dict[int, str] = {
     8: "UpgradePreparation",
     9: "Setup",
 }
-# String forms seen on the wire (Get / EventNotification) plus the APK codes above.
+# All native ZRM names above, plus valid wire strings outside that numeric table.
+# TestDrive is used by FgState.kt; Running and Backup are observed firmware replies.
+# Backup has no evidenced numeric code: do not assign one or replace it with unknown.
 FG_STATE_NAMES: tuple[str, ...] = (
-    "Reset",
-    "Standby",
-    "ResetCompliance",
-    "Therapy",
-    "MaskFit",
-    "TestMode",
-    "TestDrive",  # companion-app string; not in the 0-9 ZRM table
-    "SystemError",
-    "Upgrade",
-    "UpgradePreparation",
-    "Setup",
-    "Running",  # seen on some Air 11 firmware builds
+    *FG_STATE_BY_CODE.values(),
+    "TestDrive",
+    "Running",
+    "Backup",
 )
 
 FG_THERAPY_STATES = frozenset({"Therapy", "MaskFit", "TestDrive", "Running", "TestMode"})

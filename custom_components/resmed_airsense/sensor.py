@@ -109,7 +109,7 @@ DIAG = EntityCategory.DIAGNOSTIC
 SENSORS: tuple[AirSenseSensorDescription, ...] = (
     # ---- live -----------------------------------------------------------------------------
     # ENUM so the history/timeline card can render standby/therapy/mask-fit as a state track.
-    # Options are the APK FGState nameMappings (0–9) plus wire strings TestDrive/Running.
+    # Every canonical native/wire name, including firmware-only states such as Backup.
     D(
         key="FGState",
         translation_key="fg_state",
